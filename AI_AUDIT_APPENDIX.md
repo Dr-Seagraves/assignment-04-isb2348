@@ -1,22 +1,23 @@
 # AI Audit Appendix (Assignment 04)
 
 ## Tool(s) Used
-- [Tool name + version] (e.g., ChatGPT, Claude, GitHub Copilot)
+- [automatic agent)
 - If none, write: **"No AI tools were used for this assignment."**
 
 ## Task(s) Where AI Was Used
-- [Specific task] (e.g., "Statsmodels OLS formula for ret ~ div12m_me")
+- [completing the code and then running it to generate the statistics in the results folder.)
 
 ## Prompt(s)
-- [Exact prompt text]
+- ['read the data'
+'run the script']
 
 ## Output Summary
-- [What the AI suggested or generated]
+- The AI ran the script and generated the 3 different models and graphs.
 
 ## Verification & Modifications (Disclose • Verify • Critique)
-- **Verify:** How you checked the output (e.g., ran the script, spot-checked regression table)
-- **Critique:** What was wrong/incomplete and why
-- **Modify:** What you changed in your final work
+- **Verify:** How you checked the output (e.g., ran the script, spot-checked regression table) Yes
+- **Critique:** What was wrong/incomplete and why Nothing
+- **Modify:** What you changed in your final work Nothing
 
 ## If No AI Tools Used
 Write: "No AI tools were used for this assignment."

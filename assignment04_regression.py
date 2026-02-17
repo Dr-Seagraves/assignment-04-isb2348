@@ -41,6 +41,38 @@ REGRESSION_SPECS = [
 ]
 
 
+def _extract_year_from_date_series(s: pd.Series) -> pd.Series:
+    """
+    Robustly extract a year from a Series-like `date` column.
+
+    Handles:
+    - proper datetimes (via pd.to_datetime)
+    - numeric year values (e.g., 2004, 2004.0)
+    - strings containing a four-digit year (e.g., 'Dec-2004', '2004-12-31')
+
+    Returns a nullable integer Series (dtype "Int64") where extraction failed
+    values are <NA>.
+    """
+    # Try parsing as datetime first
+    year = pd.to_datetime(s, errors="coerce").dt.year
+
+    # If parsing failed for some entries, try numeric conversion (e.g., '2004' or 2004.0)
+    mask = year.isna()
+    if mask.any():
+        numeric = pd.to_numeric(s, errors="coerce")
+        numeric_year = numeric.where((numeric >= 1900) & (numeric <= 2100))
+        year = year.fillna(numeric_year)
+
+    # Still missing? Try extracting a 4-digit year substring from the string representation
+    mask = year.isna()
+    if mask.any():
+        extracted = s.astype(str).str.extract(r"(\d{4})")[0]
+        year = year.fillna(pd.to_numeric(extracted, errors="coerce"))
+
+    # Return as nullable integer dtype
+    return year.astype("Int64")
+
+
 def _merge_annual_interest_rates(df: pd.DataFrame, data_dir: Path) -> pd.DataFrame:
     """
     Merge year-end (December) interest rates by year.
@@ -60,7 +92,7 @@ def _merge_annual_interest_rates(df: pd.DataFrame, data_dir: Path) -> pd.DataFra
 
     df = df.copy()
     if "year" not in df.columns and "date" in df.columns:
-        df["year"] = pd.to_datetime(df["date"], errors="coerce").dt.year
+        df["year"] = _extract_year_from_date_series(df["date"])
     df = df.merge(rates_dec, on="year", how="left")
     return df
 
@@ -91,17 +123,26 @@ def load_reit_annual_data(data_path: Path) -> pd.DataFrame:
     """
     df = pd.read_csv(data_path)
 
+    # Normalize possible column name variants for dividend yield
+    if "div12m_me" not in df.columns and "div_12m_me" in df.columns:
+        df = df.rename(columns={"div_12m_me": "div12m_me"})
+
     if "year" not in df.columns and "date" in df.columns:
+        # Keep original date parsing but use robust extractor for the year
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df["year"] = df["date"].dt.year
+        df["year"] = _extract_year_from_date_series(df["date"])
 
     df = df.rename(columns={"ret12": "ret"})
 
     df = _merge_annual_interest_rates(df, data_path.parent)
 
-    # TODO: Drop rows with missing values in ret, div12m_me, prime_rate
-    # Hint: df = df.dropna(subset=["ret", "div12m_me", "prime_rate"])
-    df = df.dropna(subset=["ret", "div12m_me", "prime_rate"])
+    # Drop rows with missing values in ret, div12m_me, prime_rate
+    required_cols = ["ret", "div12m_me", "prime_rate"]
+    missing_cols = [c for c in required_cols if c not in df.columns]
+    if missing_cols:
+        raise KeyError(f"Missing required column(s) for analysis: {missing_cols}")
+
+    df = df.dropna(subset=required_cols)
 
     return df
 
@@ -122,10 +163,8 @@ def estimate_regression(df: pd.DataFrame, x_var: str):
     statsmodels.regression.linear_model.RegressionResultsWrapper
         Fitted regression model.
     """
-    # TODO: Use statsmodels.formula.api.ols to estimate ret ~ x_var
-    # Hint: model = ols(f"ret ~ {x_var}", data=df).fit()
-    # return model
-    raise NotImplementedError("Implement the regression estimation here")
+    model = ols(f"ret ~ {x_var}", data=df).fit()
+    return model
 
 
 def save_regression_summary(model, output_path: Path) -> None:
@@ -135,7 +174,7 @@ def save_regression_summary(model, output_path: Path) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # TODO: Write str(model.summary()) to the output file
     with open(output_path, "w") as f:
-        pass  # TODO
+        f.write(str(model.summary()))
 
 
 def plot_scatter_with_regression(
@@ -151,14 +190,37 @@ def plot_scatter_with_regression(
     - Zoom axis limits to central data (e.g., 2nd–98th percentiles) so the slope is easier to see
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # TODO: Create fig, ax with plt.subplots(figsize=(10, 6))
-    # TODO: Filter to rows with valid x_var and ret
-    # TODO: Scatter plot
-    # TODO: Overlay regression line (use model.params['Intercept'] and model.params[x_var])
-    # TODO: Set axis limits to zoom on central data (e.g., percentiles 2–98)
-    # TODO: Add title (include R²), xlabel, ylabel="Annual Return", legend
-    # TODO: Save with plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    pass  # TODO
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    plot_df = df[[x_var, "ret"]].dropna()
+    if plot_df.empty:
+        # Nothing to plot
+        fig.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.close(fig)
+        return
+
+    x = plot_df[x_var]
+    y = plot_df["ret"]
+    ax.scatter(x, y, alpha=0.6, label="Data")
+
+    # Regression line
+    intercept = float(model.params.get("Intercept", 0.0))
+    slope = float(model.params.get(x_var, 0.0))
+    x_min, x_max = x.quantile(0.02), x.quantile(0.98)
+    xs = np.linspace(x_min, x_max, 100)
+    ys = intercept + slope * xs
+    ax.plot(xs, ys, color="C1", linewidth=2, label="Fit")
+
+    # Labels and title
+    r2 = float(getattr(model, "rsquared", np.nan))
+    ax.set_title(f"{title} (R²={r2:.3f})")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Annual Return")
+    ax.legend()
+    ax.set_xlim(x_min, x_max)
+
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 def print_key_results(model, x_var: str) -> None:
@@ -168,9 +230,26 @@ def print_key_results(model, x_var: str) -> None:
     print("\n" + "=" * 60)
     print(f"ret (annual) ~ {x_var.upper()}")
     print("=" * 60)
-    # TODO: Print intercept (β₀), slope (β₁), standard errors, t-stats, p-values
-    # TODO: Print R², Adj R², N
-    # TODO: Print whether slope is positive/negative and significant at 5%
+    params = model.params
+    b0 = params.get("Intercept", np.nan)
+    b1 = params.get(x_var, np.nan)
+    se = model.bse
+    se0 = se.get("Intercept", np.nan)
+    se1 = se.get(x_var, np.nan)
+    t = model.tvalues
+    t0 = t.get("Intercept", np.nan)
+    t1 = t.get(x_var, np.nan)
+    p = model.pvalues
+    p0 = p.get("Intercept", np.nan)
+    p1 = p.get(x_var, np.nan)
+
+    print(f"Intercept (β0): {b0:.6f}  SE={se0:.4f}  t={t0:.3f}  p={p0:.3g}")
+    print(f"Slope (β1) for {x_var}: {b1:.6f}  SE={se1:.4f}  t={t1:.3f}  p={p1:.3g}")
+    print(f"R²={model.rsquared:.4f}  Adj R²={model.rsquared_adj:.4f}  N={int(model.nobs)}")
+
+    signif = "significant" if (p1 < 0.05) else "not significant"
+    direction = "positive" if b1 > 0 else "negative" if b1 < 0 else "zero"
+    print(f"Slope is {direction} and {signif} at 5%")
     print("=" * 60 + "\n")
 
 
